@@ -1,0 +1,1917 @@
+import React, { useState, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInWithCustomToken, 
+  signInAnonymously, 
+  onAuthStateChanged,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  sendPasswordResetEmail,
+  signOut,
+  updateProfile
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  doc, 
+  getDoc, 
+  setDoc, 
+  updateDoc, 
+  collection, 
+  onSnapshot, 
+  addDoc, 
+  deleteDoc 
+} from 'firebase/firestore';
+
+const apiKey = ""; // Se inyecta automáticamente en tiempo de ejecución para Gemini
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'smartpantry-app';
+
+// Inicializar Firebase con control de errores para previsualización local fluida
+let auth;
+let db;
+try {
+  const firebaseConfig = JSON.parse(__firebase_config);
+  const app = initializeApp(firebaseConfig);
+  auth = getAuth(app);
+  db = getFirestore(app);
+} catch (e) {
+  console.warn("Firebase no configurado de forma externa, utilizando sistema simulado local.");
+}
+
+const DEFAULT_PANTRY = [
+  { id: 'p1', name: 'Huevos orgánicos', category: 'Lácteos y Huevos', quantity: '12 unidades', addedDate: '2026-06-10', expiryDate: '2026-06-25', daysLeft: 10 },
+  { id: 'p2', name: 'Leche Desnatada', category: 'Lácteos y Huevos', quantity: '1 Litro', addedDate: '2026-06-12', expiryDate: '2026-06-18', daysLeft: 3 },
+  { id: 'p3', name: 'Tomates Cherry', category: 'Verduras y Hortalizas', quantity: '500g', addedDate: '2026-06-14', expiryDate: '2026-06-19', daysLeft: 4 }
+];
+
+const DEFAULT_ESSENTIALS = [
+  { id: 'e1', name: 'Leche Desnatada', category: 'Lácteos y Huevos', minQuantity: '1 Litro' },
+  { id: 'e2', name: 'Huevos', category: 'Lácteos y Huevos', minQuantity: '6 unidades' },
+  { id: 'e3', name: 'Tomates', category: 'Verduras y Hortalizas', minQuantity: '500g' }
+];
+
+const SIMULATED_PHOTOS = [
+  {
+    name: 'Plátano maduro',
+    imageUrl: 'https://images.unsplash.com/photo-1571771894821-ce9b6c11b08e?w=500&auto=format&fit=crop&q=60&ixlib=rb-4.0.3',
+    mimeType: 'image/jpeg'
+  },
+  {
+    name: 'Yogur Griego',
+    imageUrl: 'https://images.unsplash.com/photo-1488477181946-6428a0291777?w=500&auto=format&fit=crop&q=60&ixlib=rb-4.0.3',
+    mimeType: 'image/jpeg'
+  },
+  {
+    name: 'Manzanas Rojas',
+    imageUrl: 'https://images.unsplash.com/photo-1560806887-1e4cd0b6cbd6?w=500&auto=format&fit=crop&q=60&ixlib=rb-4.0.3',
+    mimeType: 'image/jpeg'
+  }
+];
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [loadingAuth, setLoadingAuth] = useState(true);
+  const [activeTab, setActiveTab] = useState('dashboard'); // dashboard, pantry, essentials, scan, recipes, group
+  const [pantry, setPantry] = useState([]);
+  const [essentials, setEssentials] = useState([]);
+  const [recipes, setRecipes] = useState([]);
+  const [profile, setProfile] = useState({ displayName: '', familyGroupId: null, familyGroupName: '' });
+  
+  // Estado para alertas y notificaciones personalizadas
+  const [toast, setToast] = useState(null);
+
+  // Estados de carga e interacción con IA
+  const [loadingRecipe, setLoadingRecipe] = useState(false);
+  const [loadingScan, setLoadingScan] = useState(false);
+
+  // Estados de escáner y filtros de búsqueda
+  const [scanImage, setScanImage] = useState(null);
+  const [scanPreviewUrl, setScanPreviewUrl] = useState(null);
+  const [aiResult, setAiResult] = useState(null);
+  const [filterCategory, setFilterCategory] = useState('Todos');
+  const [searchQuery, setSearchQuery] = useState('');
+
+  // Estados de modales e inputs de grupo
+  const [showAddPantryModal, setShowAddPantryModal] = useState(false);
+  const [showAddEssentialModal, setShowAddEssentialModal] = useState(false);
+  const [selectedRecipe, setSelectedRecipe] = useState(null);
+  const [groupCodeInput, setGroupCodeInput] = useState('');
+  const [groupNameInput, setGroupNameInput] = useState('');
+
+  // Formularios de entrada manual
+  const [manualPantry, setManualPantry] = useState({ name: '', category: 'Verduras y Hortalizas', quantity: '', daysToExpiry: '7' });
+  const [manualEssential, setManualEssential] = useState({ name: '', category: 'Verduras y Hortalizas', minQuantity: '' });
+
+  const [authMode, setAuthMode] = useState('login'); // login, register, forgot
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authName, setAuthName] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authSuccess, setAuthSuccess] = useState('');
+  const [rememberMe, setRememberMe] = useState(false);
+
+  // Cargar preferencias guardadas ("Recordar usuario / familia") en el primer renderizado
+  useEffect(() => {
+    const savedRemember = localStorage.getItem('smartpantry_remember') === 'true';
+    setRememberMe(savedRemember);
+    if (savedRemember) {
+      const savedEmail = localStorage.getItem('smartpantry_email') || '';
+      setAuthEmail(savedEmail);
+      
+      const savedFamilyId = localStorage.getItem('smartpantry_family_id');
+      const savedFamilyName = localStorage.getItem('smartpantry_family_name');
+      if (savedFamilyId && savedFamilyName) {
+        setProfile(prev => ({
+          ...prev,
+          familyGroupId: savedFamilyId,
+          familyGroupName: savedFamilyName
+        }));
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!auth) {
+      setLoadingAuth(false);
+      return;
+    }
+    const initAuth = async () => {
+      if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+        try {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } catch (err) {
+          console.error("Fallo al iniciar sesión con token personalizado:", err);
+        }
+      }
+    };
+    initAuth();
+
+    const unsubscribe = onAuthStateChanged(auth, (usr) => {
+      setUser(usr);
+      setLoadingAuth(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) {
+      // Si es offline / invitado, cargamos desde localStorage
+      const savedPantry = localStorage.getItem('smartpantry_local_pantry');
+      const savedEssentials = localStorage.getItem('smartpantry_local_essentials');
+      setPantry(savedPantry ? JSON.parse(savedPantry) : DEFAULT_PANTRY);
+      setEssentials(savedEssentials ? JSON.parse(savedEssentials) : DEFAULT_ESSENTIALS);
+      return;
+    }
+
+    if (!db) return;
+
+    let unsubscribePantry = () => {};
+    let unsubscribeEssentials = () => {};
+    let unsubscribeProfile = () => {};
+
+    // Obtener información del perfil del usuario
+    const profileRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info');
+    unsubscribeProfile = onSnapshot(profileRef, (docSnap) => {
+      const profileData = docSnap.data() || { displayName: user.displayName || 'Usuario', familyGroupId: null, familyGroupName: '' };
+      
+      // Si tenemos guardada una familia recordada localmente y el perfil online no tiene una, la vinculamos para comodidad
+      const localFamilyId = localStorage.getItem('smartpantry_family_id');
+      const localFamilyName = localStorage.getItem('smartpantry_family_name');
+      if (rememberMe && !profileData.familyGroupId && localFamilyId && localFamilyName) {
+        profileData.familyGroupId = localFamilyId;
+        profileData.familyGroupName = localFamilyName;
+        // Sincronizar de vuelta a firestore de forma segura
+        setDoc(profileRef, profileData, { merge: true });
+      }
+
+      setProfile(profileData);
+
+      // Si "Recordar" está activo, guardamos la familia actual en local
+      if (rememberMe) {
+        if (profileData.familyGroupId) {
+          localStorage.setItem('smartpantry_family_id', profileData.familyGroupId);
+          localStorage.setItem('smartpantry_family_name', profileData.familyGroupName);
+        } else {
+          localStorage.removeItem('smartpantry_family_id');
+          localStorage.removeItem('smartpantry_family_name');
+        }
+      }
+
+      const famId = profileData.familyGroupId;
+
+      // Cargar despensas compartidas (Familia) o privadas (Individual)
+      if (famId) {
+        const pantryCol = collection(db, 'artifacts', appId, 'public', 'data', 'familyPantries');
+        unsubscribePantry = onSnapshot(pantryCol, (snapshot) => {
+          const items = snapshot.docs
+            .map(d => ({ dbId: d.id, ...d.data() }))
+            .filter(item => item.familyGroupId === famId);
+          setPantry(items);
+        }, (error) => console.error("Error al cargar despensa familiar:", error));
+
+        const essentialsCol = collection(db, 'artifacts', appId, 'public', 'data', 'familyEssentials');
+        unsubscribeEssentials = onSnapshot(essentialsCol, (snapshot) => {
+          const items = snapshot.docs
+            .map(d => ({ dbId: d.id, ...d.data() }))
+            .filter(item => item.familyGroupId === famId);
+          setEssentials(items);
+        }, (error) => console.error("Error al cargar esenciales familiares:", error));
+
+      } else {
+        const pantryCol = collection(db, 'artifacts', appId, 'users', user.uid, 'pantries');
+        unsubscribePantry = onSnapshot(pantryCol, (snapshot) => {
+          const items = snapshot.docs.map(d => ({ dbId: d.id, ...d.data() }));
+          setPantry(items);
+        }, (error) => console.error("Error al cargar despensa privada:", error));
+
+        const essentialsCol = collection(db, 'artifacts', appId, 'users', user.uid, 'essentials');
+        unsubscribeEssentials = onSnapshot(essentialsCol, (snapshot) => {
+          const items = snapshot.docs.map(d => ({ dbId: d.id, ...d.data() }));
+          setEssentials(items);
+        }, (error) => console.error("Error al cargar esenciales privados:", error));
+      }
+    }, (error) => {
+      console.error("Error en perfil:", error);
+    });
+
+    return () => {
+      unsubscribeProfile();
+      unsubscribePantry();
+      unsubscribeEssentials();
+    };
+  }, [user, rememberMe]);
+
+  // Respaldar localmente si es invitado offline
+  useEffect(() => {
+    if (!user) {
+      localStorage.setItem('smartpantry_local_pantry', JSON.stringify(pantry));
+    }
+  }, [pantry, user]);
+
+  useEffect(() => {
+    if (!user) {
+      localStorage.setItem('smartpantry_local_essentials', JSON.stringify(essentials));
+    }
+  }, [essentials, user]);
+
+  const showToast = (message, type = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => {
+      setToast(null);
+    }, 4000);
+  };
+
+  const handleRegister = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthSuccess('');
+    if (!authEmail || !authPassword || !authName) {
+      setAuthError('Por favor, rellena todos los campos obligatorios.');
+      return;
+    }
+    try {
+      const userCredential = await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+      await updateProfile(userCredential.user, { displayName: authName });
+      
+      // Aplicar opción recordar
+      if (rememberMe) {
+        localStorage.setItem('smartpantry_remember', 'true');
+        localStorage.setItem('smartpantry_email', authEmail);
+      } else {
+        localStorage.removeItem('smartpantry_remember');
+        localStorage.removeItem('smartpantry_email');
+        localStorage.removeItem('smartpantry_family_id');
+        localStorage.removeItem('smartpantry_family_name');
+      }
+
+      if (db) {
+        const profileRef = doc(db, 'artifacts', appId, 'users', userCredential.user.uid, 'profile', 'info');
+        await setDoc(profileRef, {
+          displayName: authName,
+          email: authEmail,
+          familyGroupId: null,
+          familyGroupName: ''
+        });
+      }
+      showToast('¡Registro de SmartPantry completado con éxito!', 'success');
+    } catch (err) {
+      setAuthError(err.message.includes('email-already-in-use') ? 'Este correo ya se encuentra registrado.' : err.message);
+    }
+  };
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthSuccess('');
+    if (!authEmail || !authPassword) {
+      setAuthError('Introduce tu correo y contraseña.');
+      return;
+    }
+    try {
+      await signInWithEmailAndPassword(auth, authEmail, authPassword);
+      
+      // Aplicar opción recordar
+      if (rememberMe) {
+        localStorage.setItem('smartpantry_remember', 'true');
+        localStorage.setItem('smartpantry_email', authEmail);
+      } else {
+        localStorage.removeItem('smartpantry_remember');
+        localStorage.removeItem('smartpantry_email');
+        localStorage.removeItem('smartpantry_family_id');
+        localStorage.removeItem('smartpantry_family_name');
+      }
+
+      showToast('Sesión iniciada correctamente.', 'success');
+    } catch (err) {
+      setAuthError('Credenciales incorrectas. Verifica tu contraseña.');
+    }
+  };
+
+  const handleForgotPassword = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthSuccess('');
+    if (!authEmail) {
+      setAuthError('Por favor, introduce tu dirección de correo electrónico.');
+      return;
+    }
+    try {
+      await sendPasswordResetEmail(auth, authEmail);
+      setAuthSuccess('¡Enlace de recuperación enviado! Revisa tu correo de inmediato.');
+      showToast('Correo de restablecimiento enviado.', 'info');
+    } catch (err) {
+      setAuthError('No se encontró ninguna cuenta registrada con este correo.');
+    }
+  };
+
+  const handleSignOut = async () => {
+    if (auth) {
+      await signOut(auth);
+      showToast('Sesión cerrada de SmartPantry.', 'info');
+    } else {
+      setUser(null);
+    }
+    // Si recordar no está activo, limpiamos el email para la próxima vez
+    if (!rememberMe) {
+      setAuthEmail('');
+    }
+    setActiveTab('dashboard');
+  };
+
+  const handleGuestMode = () => {
+    setUser({ uid: 'guest-user', displayName: 'Invitado', isAnonymous: true });
+    showToast('Acceso temporal como invitado iniciado.', 'info');
+  };
+
+  const handleCreateFamilyGroup = async (e) => {
+    e.preventDefault();
+    if (!db || !user) return;
+    if (!groupNameInput.trim()) {
+      showToast('Introduce un nombre para tu familia.', 'warning');
+      return;
+    }
+
+    const randomId = 'SP-' + Math.floor(100000 + Math.random() * 900000);
+    try {
+      const profileRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info');
+      await setDoc(profileRef, {
+        displayName: profile.displayName || user.displayName || 'Miembro',
+        familyGroupId: randomId,
+        familyGroupName: groupNameInput.trim(),
+        email: user.email || 'invitado@smartpantry.com'
+      }, { merge: true });
+
+      if (rememberMe) {
+        localStorage.setItem('smartpantry_family_id', randomId);
+        localStorage.setItem('smartpantry_family_name', groupNameInput.trim());
+      }
+
+      showToast(`¡Grupo "${groupNameInput}" creado! Código: ${randomId}`, 'success');
+      setGroupNameInput('');
+    } catch (err) {
+      showToast('Error al crear el grupo familiar.', 'error');
+    }
+  };
+
+  const handleJoinFamilyGroup = async (e) => {
+    e.preventDefault();
+    if (!db || !user) return;
+    const cleanCode = groupCodeInput.trim().toUpperCase();
+    if (!cleanCode) {
+      showToast('Introduce el código familiar.', 'warning');
+      return;
+    }
+
+    try {
+      const profileRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info');
+      await setDoc(profileRef, {
+        displayName: profile.displayName || user.displayName || 'Miembro',
+        familyGroupId: cleanCode,
+        familyGroupName: 'Hogar Compartido',
+        email: user.email || 'invitado@smartpantry.com'
+      }, { merge: true });
+
+      if (rememberMe) {
+        localStorage.setItem('smartpantry_family_id', cleanCode);
+        localStorage.setItem('smartpantry_family_name', 'Hogar Compartido');
+      }
+
+      showToast(`¡Te has unido exitosamente al grupo ${cleanCode}!`, 'success');
+      setGroupCodeInput('');
+    } catch (err) {
+      showToast('No se pudo establecer la unión al grupo.', 'error');
+    }
+  };
+
+  const handleLeaveFamilyGroup = async () => {
+    if (!db || !user) return;
+    try {
+      const profileRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info');
+      await setDoc(profileRef, {
+        familyGroupId: null,
+        familyGroupName: ''
+      }, { merge: true });
+
+      localStorage.removeItem('smartpantry_family_id');
+      localStorage.removeItem('smartpantry_family_name');
+
+      showToast('Has salido de tu grupo familiar.', 'info');
+    } catch (err) {
+      showToast('Error al salir del grupo.', 'error');
+    }
+  };
+
+  const callGemini = async (payload) => {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+    let delay = 1000;
+    for (let i = 0; i < 5; i++) {
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (response.ok) return await response.json();
+        if (response.status === 429 || response.status >= 500) {
+          await new Promise(res => setTimeout(res, delay));
+          delay *= 2;
+        } else {
+          throw new Error(`Error API Gemini: ${response.status}`);
+        }
+      } catch (error) {
+        if (i === 4) throw error;
+        await new Promise(res => setTimeout(res, delay));
+        delay *= 2;
+      }
+    }
+  };
+
+  const handleFileChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setScanImage({
+          base64: reader.result.split(',')[1],
+          mimeType: file.type
+        });
+        setScanPreviewUrl(reader.result);
+        setAiResult(null);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const selectSimulatedFood = async (item) => {
+    try {
+      setLoadingScan(true);
+      setScanPreviewUrl(item.imageUrl);
+      setAiResult(null);
+      const response = await fetch(item.imageUrl);
+      const blob = await response.blob();
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setScanImage({
+          base64: reader.result.split(',')[1],
+          mimeType: 'image/jpeg'
+        });
+        setLoadingScan(false);
+        showToast(`Imagen de "${item.name}" cargada para análisis de IA.`, 'info');
+      };
+      reader.readAsDataURL(blob);
+    } catch (err) {
+      setLoadingScan(false);
+      showToast('Error al simular la carga.', 'error');
+    }
+  };
+
+  const analyzeImageWithAI = async () => {
+    if (!scanImage) {
+      showToast('Saca una foto o selecciona una demo primero.', 'warning');
+      return;
+    }
+    setLoadingScan(true);
+    setAiResult(null);
+
+    const promptText = `Eres un experto chef y gestor de despensa saludable de SmartPantry.
+Analiza este producto alimenticio de la imagen.
+Debes devolver obligatoriamente un formato JSON puro sin formateadores markdown de código como \`\`\`json:
+{
+  "name": "Nombre reconocible del alimento en español (ej. Yogur de Fresa, Plátano)",
+  "category": "Una de estas: 'Frutas', 'Verduras y Hortalizas', 'Lácteos y Huevos', 'Carnes y Pescados', 'Despensa', 'Panadería', 'Bebidas'",
+  "quantity": "Cantidad aproximada en unidades o peso (ej. '1 Litro', '3 piezas')",
+  "estimatedDaysToExpiry": 7,
+  "nutritionalAdvice": "Consejo de salud para consumir este alimento"
+}`;
+
+    const payload = {
+      contents: [{
+        parts: [
+          { text: promptText },
+          { inlineData: { mimeType: scanImage.mimeType, data: scanImage.base64 } }
+        ]
+      }],
+      generationConfig: { responseMimeType: "application/json" }
+    };
+
+    try {
+      const result = await callGemini(payload);
+      const rawText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (rawText) {
+        const cleaned = rawText.trim().replace(/^```json\s*/, '').replace(/```$/, '');
+        setAiResult(JSON.parse(cleaned));
+        showToast('¡Alimento analizado correctamente!', 'success');
+      } else {
+        throw new Error();
+      }
+    } catch (err) {
+      showToast('Error de comunicación con el modelo de IA.', 'error');
+    } finally {
+      setLoadingScan(false);
+    }
+  };
+
+  const addAiResultToPantry = async () => {
+    if (!aiResult) return;
+    const today = new Date();
+    const expiry = new Date();
+    const days = parseInt(aiResult.estimatedDaysToExpiry) || 7;
+    expiry.setDate(today.getDate() + days);
+
+    const newItem = {
+      name: aiResult.name,
+      category: aiResult.category || 'Despensa',
+      quantity: aiResult.quantity || '1 unidad',
+      addedDate: today.toISOString().split('T')[0],
+      expiryDate: expiry.toISOString().split('T')[0],
+      daysLeft: days
+    };
+
+    try {
+      if (db && user && !user.isAnonymous) {
+        if (profile.familyGroupId) {
+          await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'familyPantries'), {
+            ...newItem,
+            familyGroupId: profile.familyGroupId,
+            addedBy: profile.displayName || 'Familia'
+          });
+        } else {
+          await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'pantries'), newItem);
+        }
+      } else {
+        setPantry(prev => [{ id: 'local-' + Date.now(), ...newItem }, ...prev]);
+      }
+      showToast(`"${newItem.name}" añadido a la despensa.`, 'success');
+      setScanPreviewUrl(null);
+      setScanImage(null);
+      setAiResult(null);
+      setActiveTab('pantry');
+    } catch (e) {
+      showToast('Error al almacenar el alimento.', 'error');
+    }
+  };
+
+  const generateRecipesWithAI = async () => {
+    if (pantry.length === 0) {
+      showToast('Añade alimentos a tu despensa antes de cocinar.', 'warning');
+      return;
+    }
+    setLoadingRecipe(true);
+    setRecipes([]);
+
+    const pantryText = pantry.map(i => `${i.name} (${i.quantity})`).join(', ');
+    const promptText = `Soy miembro de SmartPantry. Tengo estos ingredientes en casa: ${pantryText}.
+Recomiéndame 3 recetas ricas y saludables basadas principalmente en ellos.
+Devuelve únicamente una respuesta en formato JSON crudo (sin formateadores markdown):
+{
+  "recipes": [
+    {
+      "title": "Nombre de la receta saludable",
+      "prepTime": "30 min",
+      "difficulty": "Fácil",
+      "healthHighlight": "Propiedades saludables",
+      "ingredientsUsed": ["Ingrediente usado 1", "Ingrediente usado 2"],
+      "ingredientsMissing": [],
+      "instructions": ["Paso 1", "Paso 2"],
+      "calories": "350 kcal"
+    }
+  ]
+}`;
+
+    const payload = {
+      contents: [{ parts: [{ text: promptText }] }],
+      generationConfig: { responseMimeType: "application/json" }
+    };
+
+    try {
+      const result = await callGemini(payload);
+      const rawText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (rawText) {
+        const cleaned = rawText.trim().replace(/^```json\s*/, '').replace(/```$/, '');
+        const data = JSON.parse(cleaned);
+        setRecipes(data.recipes || []);
+        showToast('¡Recetas saludables generadas por la IA de SmartPantry!', 'success');
+      }
+    } catch (err) {
+      showToast('No se pudieron crear las recetas.', 'error');
+    } finally {
+      setLoadingRecipe(false);
+    }
+  };
+
+  const handleAddManualPantry = async (e) => {
+    e.preventDefault();
+    if (!manualPantry.name.trim()) return;
+
+    const today = new Date();
+    const expiry = new Date();
+    const days = parseInt(manualPantry.daysToExpiry) || 7;
+    expiry.setDate(today.getDate() + days);
+
+    const newItem = {
+      name: manualPantry.name,
+      category: manualPantry.category,
+      quantity: manualPantry.quantity || '1 unidad',
+      addedDate: today.toISOString().split('T')[0],
+      expiryDate: expiry.toISOString().split('T')[0],
+      daysLeft: days
+    };
+
+    try {
+      if (db && user && !user.isAnonymous) {
+        if (profile.familyGroupId) {
+          await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'familyPantries'), {
+            ...newItem,
+            familyGroupId: profile.familyGroupId,
+            addedBy: profile.displayName || 'Familia'
+          });
+        } else {
+          await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'pantries'), newItem);
+        }
+      } else {
+        setPantry(prev => [{ id: 'local-' + Date.now(), ...newItem }, ...prev]);
+      }
+      showToast('Alimento añadido manualmente.', 'success');
+      setShowAddPantryModal(false);
+      setManualPantry({ name: '', category: 'Verduras y Hortalizas', quantity: '', daysToExpiry: '7' });
+    } catch (err) {
+      showToast('Error al guardar.', 'error');
+    }
+  };
+
+  const handleAddManualEssential = async (e) => {
+    e.preventDefault();
+    if (!manualEssential.name.trim()) return;
+
+    const newItem = {
+      name: manualEssential.name,
+      category: manualEssential.category,
+      minQuantity: manualEssential.minQuantity || '1 unidad'
+    };
+
+    try {
+      if (db && user && !user.isAnonymous) {
+        if (profile.familyGroupId) {
+          await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'familyEssentials'), {
+            ...newItem,
+            familyGroupId: profile.familyGroupId
+          });
+        } else {
+          await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'essentials'), newItem);
+        }
+      } else {
+        setEssentials(prev => [{ id: 'local-' + Date.now(), ...newItem }, ...prev]);
+      }
+      showToast('Añadido a tus imprescindibles de SmartPantry.', 'success');
+      setShowAddEssentialModal(false);
+      setManualEssential({ name: '', category: 'Verduras y Hortalizas', minQuantity: '' });
+    } catch (err) {
+      showToast('No se pudo añadir el imprescindible.', 'error');
+    }
+  };
+
+  const deletePantryItem = async (item) => {
+    try {
+      if (db && user && !user.isAnonymous) {
+        if (profile.familyGroupId && item.dbId) {
+          await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'familyPantries', item.dbId));
+        } else if (item.dbId) {
+          await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'pantries', item.dbId));
+        }
+      } else {
+        setPantry(prev => prev.filter(i => i.id !== item.id));
+      }
+      showToast('Eliminado de la despensa.', 'info');
+    } catch (err) {
+      showToast('Error al eliminar.', 'error');
+    }
+  };
+
+  const deleteEssentialItem = async (item) => {
+    try {
+      if (db && user && !user.isAnonymous) {
+        if (profile.familyGroupId && item.dbId) {
+          await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'familyEssentials', item.dbId));
+        } else if (item.dbId) {
+          await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'essentials', item.dbId));
+        }
+      } else {
+        setEssentials(prev => prev.filter(i => i.id !== item.id));
+      }
+      showToast('Eliminado de tus imprescindibles.', 'info');
+    } catch (err) {
+      showToast('Error al eliminar esencial.', 'error');
+    }
+  };
+
+  const expiringSoonItems = pantry.filter(item => {
+    const diffTime = new Date(item.expiryDate) - new Date();
+    const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    return diffDays <= 3;
+  });
+
+  const missingEssentials = essentials.filter(essential => {
+    const isAvailable = pantry.some(p => 
+      p.name.toLowerCase().includes(essential.name.toLowerCase()) || 
+      essential.name.toLowerCase().includes(p.name.toLowerCase())
+    );
+    return !isAvailable;
+  });
+
+  const filteredPantry = pantry.filter(item => {
+    const matchesSearch = item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                          item.category.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesCategory = filterCategory === 'Todos' || item.category === filterCategory;
+    return matchesSearch && matchesCategory;
+  });
+
+  const categories = ['Todos', 'Frutas', 'Verduras y Hortalizas', 'Lácteos y Huevos', 'Carnes y Pescados', 'Despensa', 'Panadería', 'Bebidas'];
+
+  if (loadingAuth) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+        <div className="text-center space-y-4">
+          <div className="animate-spin rounded-full h-12 w-12 border-t-4 border-b-4 border-emerald-600 mx-auto"></div>
+          <p className="text-slate-500 font-medium text-sm">Cargando SmartPantry...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Interfaz de login forzado al abrir por primera vez si no hay sesión
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-gradient-to-tr from-emerald-50 to-teal-100 flex flex-col justify-center p-4 sm:p-6 md:p-8">
+        <div className="max-w-md w-full mx-auto bg-white rounded-3xl shadow-2xl border border-emerald-100 overflow-hidden">
+          
+          <div className="p-8 bg-emerald-700 text-white text-center space-y-2 relative">
+            <div className="mx-auto w-14 h-14 bg-white bg-opacity-20 rounded-2xl flex items-center justify-center text-3xl shadow-inner">
+              🍏
+            </div>
+            <h1 className="text-3xl font-extrabold tracking-tight">SmartPantry</h1>
+            <p className="text-xs text-emerald-100 font-medium">Gestiona tu alacena inteligente y reduce el desperdicio</p>
+          </div>
+
+          <div className="p-6 space-y-4">
+            {authError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 text-xs rounded-xl font-medium">
+                ⚠️ {authError}
+              </div>
+            )}
+            {authSuccess && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs rounded-xl font-medium">
+                ✅ {authSuccess}
+              </div>
+            )}
+
+            {authMode === 'login' && (
+              <form onSubmit={handleLogin} className="space-y-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 block mb-1">Correo Electrónico</label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="ejemplo@correo.com"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                  />
+                </div>
+                <div>
+                  <div className="flex justify-between items-center mb-1">
+                    <label className="text-xs font-semibold text-slate-500 block">Contraseña</label>
+                    <button 
+                      type="button" 
+                      onClick={() => setAuthMode('forgot')} 
+                      className="text-xs text-emerald-600 font-bold hover:underline"
+                    >
+                      ¿La olvidaste?
+                    </button>
+                  </div>
+                  <input
+                    type="password"
+                    required
+                    placeholder="••••••••"
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                  />
+                </div>
+
+                {/* Checkbox Recordar Usuario / Familia */}
+                <div className="flex items-center">
+                  <input
+                    id="remember_me"
+                    type="checkbox"
+                    checked={rememberMe}
+                    onChange={(e) => setRememberMe(e.target.checked)}
+                    className="h-4 w-4 text-emerald-600 focus:ring-emerald-500 border-slate-300 rounded cursor-pointer"
+                  />
+                  <label htmlFor="remember_me" className="ml-2 block text-xs font-medium text-slate-600 cursor-pointer select-none">
+                    Recordar mi usuario y grupo familiar
+                  </label>
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl transition active:scale-95 text-sm shadow-md shadow-emerald-100"
+                >
+                  Iniciar Sesión
+                </button>
+              </form>
+            )}
+
+            {authMode === 'register' && (
+              <form onSubmit={handleRegister} className="space-y-4">
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 block mb-1">Tu Nombre o Apellido Familiar</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Ej. Familia Pérez o Carlos"
+                    value={authName}
+                    onChange={(e) => setAuthName(e.target.value)}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 block mb-1">Correo Electrónico</label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="ejemplo@correo.com"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 block mb-1">Contraseña</label>
+                  <input
+                    type="password"
+                    required
+                    placeholder="Mínimo 6 caracteres"
+                    value={authPassword}
+                    onChange={(e) => setAuthPassword(e.target.value)}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                  />
+                </div>
+
+                <div className="flex items-center">
+                  <input
+                    id="remember_me_register"
+                    type="checkbox"
+                    checked={rememberMe}
+                    onChange={(e) => setRememberMe(e.target.checked)}
+                    className="h-4 w-4 text-emerald-600 focus:ring-emerald-500 border-slate-300 rounded cursor-pointer"
+                  />
+                  <label htmlFor="remember_me_register" className="ml-2 block text-xs font-medium text-slate-600 cursor-pointer select-none">
+                    Recordar mi usuario y grupo familiar
+                  </label>
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl transition active:scale-95 text-sm shadow-md"
+                >
+                  Crear Cuenta en SmartPantry
+                </button>
+              </form>
+            )}
+
+            {authMode === 'forgot' && (
+              <form onSubmit={handleForgotPassword} className="space-y-4">
+                <div className="bg-emerald-50 p-3 rounded-xl text-xs text-emerald-800 leading-relaxed mb-2">
+                  Introduce tu correo y te enviaremos una clave para que puedas restablecer tu contraseña inmediatamente.
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 block mb-1">Tu Correo Registrado</label>
+                  <input
+                    type="email"
+                    required
+                    placeholder="ejemplo@correo.com"
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    className="w-full px-3.5 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 rounded-xl transition active:scale-95 text-sm shadow-md"
+                >
+                  Restablecer Contraseña
+                </button>
+              </form>
+            )}
+
+            <div className="pt-4 border-t border-slate-100 flex flex-col items-center space-y-3">
+              {authMode === 'login' && (
+                <p className="text-xs text-slate-500">
+                  ¿Nuevo en la app?{' '}
+                  <button onClick={() => setAuthMode('register')} className="text-emerald-600 font-bold hover:underline">
+                    Regístrate aquí
+                  </button>
+                </p>
+              )}
+              {authMode !== 'login' && (
+                <button onClick={() => setAuthMode('login')} className="text-xs text-emerald-600 font-bold hover:underline">
+                  ← Volver al login
+                </button>
+              )}
+              
+              <div className="w-full flex items-center justify-between text-xs text-slate-400 py-1">
+                <span className="w-full border-b border-slate-200 mr-2"></span>
+                <span>O</span>
+                <span className="w-full border-b border-slate-200 ml-2"></span>
+              </div>
+
+              <button
+                onClick={handleGuestMode}
+                className="w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold py-2.5 rounded-xl transition text-xs"
+              >
+                Probar como Invitado (Modo local)
+              </button>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-800 pb-20 md:pb-0">
+      
+      {/* HEADER DE LA APP */}
+      <header className="sticky top-0 z-20 bg-white border-b border-slate-200 px-4 py-3 shadow-sm flex items-center justify-between">
+        <div className="flex items-center space-x-2">
+          <div className="p-2 bg-emerald-600 rounded-xl text-white">
+            <span className="text-xl font-bold">🍏</span>
+          </div>
+          <div>
+            <h1 className="text-sm font-extrabold text-slate-800 tracking-tight leading-none">SmartPantry</h1>
+            <p className="text-[10px] text-emerald-600 font-bold">
+              {profile.familyGroupId ? `👪 Familia: ${profile.familyGroupName}` : '👤 Cuenta Individual'}
+            </p>
+          </div>
+        </div>
+
+        {/* Info de Cuenta y Salida */}
+        <div className="flex items-center space-x-3 text-xs">
+          <button 
+            onClick={() => setActiveTab('group')}
+            className="font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-xl transition"
+          >
+            {profile.familyGroupId ? `Código: ${profile.familyGroupId}` : '👪 Grupo Familiar'}
+          </button>
+          <button 
+            onClick={handleSignOut} 
+            className="p-1.5 text-slate-400 hover:text-rose-600"
+            title="Cerrar sesión"
+          >
+            🚪 Salir
+          </button>
+        </div>
+      </header>
+
+      {/* CONTENEDOR PRINCIPAL */}
+      <main className="max-w-4xl w-full mx-auto flex-1 p-4 md:p-6">
+        
+        {/* TOAST ALERTS */}
+        {toast && (
+          <div className="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 animate-bounce">
+            <div className={`px-4 py-3 rounded-xl shadow-lg flex items-center space-x-2 text-white text-sm font-semibold ${
+              toast.type === 'success' ? 'bg-emerald-600' :
+              toast.type === 'warning' ? 'bg-amber-500' :
+              toast.type === 'error' ? 'bg-rose-600' : 'bg-blue-600'
+            }`}>
+              <span>{toast.message}</span>
+            </div>
+          </div>
+        )}
+
+        {/* --- PESTAÑA 1: DASHBOARD --- */}
+        {activeTab === 'dashboard' && (
+          <div className="space-y-6 animate-fadeIn">
+            
+            {/* Tarjeta de bienvenida */}
+            <div className="bg-gradient-to-br from-emerald-700 to-teal-800 rounded-3xl p-6 text-white shadow-md relative overflow-hidden">
+              <div className="relative z-10 space-y-4">
+                <h2 className="text-xl md:text-2xl font-bold">¡Hola, {profile.displayName || 'Miembro'}!</h2>
+                <p className="text-emerald-100 text-sm max-w-md">
+                  Tienes {pantry.length} alimentos guardados en stock. {profile.familyGroupId ? 'Compartidos con tu familia en tiempo real.' : 'En tu despensa individual.'}
+                </p>
+                <div className="flex flex-wrap gap-2 pt-2">
+                  <button 
+                    onClick={() => setActiveTab('scan')} 
+                    className="bg-white text-emerald-800 hover:bg-emerald-50 px-4 py-2 rounded-xl text-xs md:text-sm font-semibold transition active:scale-95 shadow-sm"
+                  >
+                    📸 Escanear Alimento con IA
+                  </button>
+                  <button 
+                    onClick={generateRecipesWithAI} 
+                    className="bg-teal-950 bg-opacity-30 text-white hover:bg-opacity-40 border border-teal-400 px-4 py-2 rounded-xl text-xs md:text-sm font-semibold transition active:scale-95"
+                  >
+                    🪄 Ideas de Recetas AI
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Caducidades y Faltantes */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              
+              {/* Alertas caducidad */}
+              <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="font-bold text-slate-800 flex items-center">
+                    <span className="mr-2">⌛</span> Próximo a Caducar
+                  </h3>
+                  <span className="text-xs bg-amber-100 text-amber-800 font-medium px-2 py-0.5 rounded-full">
+                    {expiringSoonItems.length} alertas
+                  </span>
+                </div>
+                
+                {expiringSoonItems.length === 0 ? (
+                  <p className="text-xs text-slate-500 py-4 text-center">¡Estupendo! Sin alertas de vencimiento para los próximos días.</p>
+                ) : (
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {expiringSoonItems.map((item, idx) => (
+                      <div key={idx} className="flex items-center justify-between p-2.5 bg-amber-50 rounded-xl border border-amber-100 text-xs">
+                        <div>
+                          <p className="font-semibold text-slate-800">{item.name}</p>
+                          <p className="text-slate-500">{item.quantity} · {item.category}</p>
+                        </div>
+                        <span className="px-2 py-1 rounded-lg font-bold bg-amber-200 text-amber-900 font-mono">
+                          {item.daysLeft <= 0 ? 'Caducado' : `${item.daysLeft}d`}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Faltantes de Lista Básica */}
+              <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="font-bold text-slate-800 flex items-center">
+                    <span className="mr-2">🚨</span> Lista Básica Faltante
+                  </h3>
+                  <span className="text-xs bg-rose-100 text-rose-800 font-medium px-2 py-0.5 rounded-full">
+                    {missingEssentials.length} requeridos
+                  </span>
+                </div>
+                
+                {missingEssentials.length === 0 ? (
+                  <p className="text-xs text-slate-500 py-4 text-center">¡Excelente! Todos tus imprescindibles están cubiertos.</p>
+                ) : (
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {missingEssentials.map((essential, idx) => (
+                      <div key={idx} className="flex items-center justify-between p-2.5 bg-rose-50 rounded-xl border border-rose-100 text-xs">
+                        <div>
+                          <p className="font-semibold text-slate-800">{essential.name}</p>
+                          <p className="text-slate-500">Mínimo sugerido: {essential.minQuantity}</p>
+                        </div>
+                        <button
+                          onClick={async () => {
+                            const today = new Date();
+                            const expiry = new Date();
+                            expiry.setDate(today.getDate() + 7);
+                            const newItem = {
+                              name: essential.name,
+                              category: essential.category,
+                              quantity: essential.minQuantity,
+                              addedDate: today.toISOString().split('T')[0],
+                              expiryDate: expiry.toISOString().split('T')[0],
+                              daysLeft: 7
+                            };
+                            if (db && user && !user.isAnonymous) {
+                              if (profile.familyGroupId) {
+                                await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'familyPantries'), {
+                                  ...newItem,
+                                  familyGroupId: profile.familyGroupId,
+                                  addedBy: profile.displayName || 'Familia'
+                                });
+                              } else {
+                                await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'pantries'), newItem);
+                              }
+                            } else {
+                              setPantry(prev => [{ id: 'local-' + Date.now(), ...newItem }, ...prev]);
+                            }
+                            showToast(`Comprado: ${essential.name}`, 'success');
+                          }}
+                          className="bg-rose-600 hover:bg-rose-700 text-white px-2.5 py-1 rounded-lg font-semibold transition active:scale-95"
+                        >
+                          + Comprado
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+            </div>
+
+          </div>
+        )}
+
+        {/* --- PESTAÑA 2: DESPENSA ACTUAL --- */}
+        {activeTab === 'pantry' && (
+          <div className="space-y-4 animate-fadeIn">
+            
+            {/* Buscador y Filtros */}
+            <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm space-y-3">
+              <div className="flex flex-col sm:flex-row gap-2">
+                <div className="relative flex-1">
+                  <input
+                    type="text"
+                    placeholder="Buscar en la despensa..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                  />
+                  <span className="absolute left-3 top-2.5 text-slate-400 text-sm">🔍</span>
+                </div>
+                <button
+                  onClick={() => setShowAddPantryModal(true)}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl text-sm font-semibold transition active:scale-95 flex items-center justify-center space-x-1"
+                >
+                  <span>+ Añadir Alimento</span>
+                </button>
+              </div>
+
+              {/* Categorías deslizables */}
+              <div className="flex items-center space-x-1.5 overflow-x-auto pb-1 scrollbar-none">
+                {categories.map(cat => (
+                  <button
+                    key={cat}
+                    onClick={() => setFilterCategory(cat)}
+                    className={`px-3 py-1 rounded-full text-xs font-medium whitespace-nowrap transition ${
+                      filterCategory === cat
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Despensa */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="px-5 py-4 border-b border-slate-100">
+                <h3 className="font-bold text-slate-800">Alimentos en Stock ({filteredPantry.length})</h3>
+              </div>
+
+              {filteredPantry.length === 0 ? (
+                <div className="p-8 text-center text-slate-400">
+                  <p className="text-sm">No se encontraron productos en la despensa.</p>
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-100">
+                  {filteredPantry.map((item, idx) => {
+                    const statusColor = item.daysLeft <= 2 ? 'bg-rose-100 text-rose-800' :
+                                        item.daysLeft <= 5 ? 'bg-amber-100 text-amber-800' :
+                                        'bg-emerald-100 text-emerald-800';
+                    return (
+                      <div key={idx} className="p-4 flex items-center justify-between hover:bg-slate-50 transition">
+                        <div className="space-y-1">
+                          <h4 className="font-semibold text-slate-800 text-sm">{item.name}</h4>
+                          <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                            <span className="bg-slate-100 text-slate-600 px-2 py-0.5 rounded-md font-medium">
+                              {item.category}
+                            </span>
+                            <span>•</span>
+                            <span>Cant: <strong className="text-slate-600">{item.quantity}</strong></span>
+                            {item.addedBy && (
+                              <>
+                                <span>•</span>
+                                <span className="text-emerald-600">Por: {item.addedBy}</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center space-x-3">
+                          <span className={`px-2.5 py-1 rounded-xl text-xs font-bold ${statusColor}`}>
+                            {item.daysLeft <= 0 ? 'Caducado' : `Vence en ${item.daysLeft} días`}
+                          </span>
+                          <button
+                            onClick={() => deletePantryItem(item)}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition"
+                          >
+                            🗑
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+          </div>
+        )}
+
+        {/* --- PESTAÑA 3: LISTA BÁSICA --- */}
+        {activeTab === 'essentials' && (
+          <div className="space-y-4 animate-fadeIn">
+            
+            <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-2">
+              <h2 className="text-lg font-bold text-slate-800">Tus Alimentos Imprescindibles</h2>
+              <p className="text-slate-500 text-xs">
+                Aquí defines la lista de alimentos que <strong>nunca deben faltar</strong> en tu hogar. SmartPantry detecta automáticamente si están disponibles y te alertará si necesitas comprar más.
+              </p>
+              <button
+                onClick={() => setShowAddEssentialModal(true)}
+                className="mt-2 bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2 rounded-xl text-xs font-semibold transition active:scale-95"
+              >
+                + Añadir Imprescindible
+              </button>
+            </div>
+
+            {/* Listado de imprescindibles */}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="divide-y divide-slate-100">
+                {essentials.map((essential, idx) => {
+                  const isAvailable = pantry.some(p => 
+                    p.name.toLowerCase().includes(essential.name.toLowerCase()) || 
+                    essential.name.toLowerCase().includes(p.name.toLowerCase())
+                  );
+
+                  return (
+                    <div key={idx} className="p-4 flex items-center justify-between hover:bg-slate-50 transition">
+                      <div>
+                        <h4 className="font-semibold text-slate-800 text-sm">{essential.name}</h4>
+                        <div className="flex items-center space-x-2 text-xs text-slate-400 mt-1">
+                          <span className="bg-slate-100 text-slate-600 px-2 py-0.5 rounded-md">
+                            {essential.category}
+                          </span>
+                          <span>•</span>
+                          <span>Mínimo: {essential.minQuantity}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center space-x-3">
+                        <span className={`px-2.5 py-1 rounded-xl text-xs font-bold ${
+                          isAvailable ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                        }`}>
+                          {isAvailable ? 'En Stock' : 'Faltante'}
+                        </span>
+                        
+                        <button
+                          onClick={() => deleteEssentialItem(essential)}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition"
+                        >
+                          🗑
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        {/* --- PESTAÑA 4: ESCÁNER DE IA --- */}
+        {activeTab === 'scan' && (
+          <div className="space-y-6 animate-fadeIn">
+            
+            <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
+              <h2 className="text-lg font-bold text-slate-800">📸 Escáner SmartPantry IA</h2>
+              <p className="text-slate-500 text-xs mt-1">
+                Haz una foto o sube una imagen de un ingrediente. El modelo Gemini de IA estimará su tipo, su caducidad aproximada y sus beneficios nutricionales.
+              </p>
+            </div>
+
+            {/* Demo rápida interactiva */}
+            <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-sm">
+              <span className="text-xs font-bold text-slate-500 uppercase tracking-wider block mb-3">
+                ⚡ Probar con una foto de prueba instantánea
+              </span>
+              <div className="grid grid-cols-3 gap-2">
+                {SIMULATED_PHOTOS.map((food, idx) => (
+                  <button
+                    key={idx}
+                    onClick={() => selectSimulatedFood(food)}
+                    className="p-1.5 bg-slate-50 hover:bg-emerald-50 border border-slate-200 hover:border-emerald-300 rounded-xl transition text-left space-y-1 text-center"
+                  >
+                    <img 
+                      src={food.imageUrl} 
+                      alt={food.name} 
+                      className="w-full h-14 object-cover rounded-lg"
+                    />
+                    <span className="text-[10px] font-semibold text-slate-700 block truncate">
+                      {food.name}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Área de cámara */}
+            <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm text-center space-y-4">
+              
+              {scanPreviewUrl ? (
+                <div className="relative max-w-sm mx-auto rounded-2xl overflow-hidden border border-slate-200 shadow-inner">
+                  <img src={scanPreviewUrl} alt="Alimento" className="w-full h-60 object-cover" />
+                  <button 
+                    onClick={() => { setScanPreviewUrl(null); setScanImage(null); setAiResult(null); }}
+                    className="absolute top-2 right-2 bg-slate-900 bg-opacity-70 text-white p-1.5 rounded-full hover:bg-opacity-90 transition"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ) : (
+                <div className="border-2 border-dashed border-slate-300 rounded-2xl p-8 hover:border-emerald-500 transition cursor-pointer relative">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleFileChange}
+                    className="absolute inset-0 opacity-0 cursor-pointer"
+                  />
+                  <div className="space-y-2 text-slate-500">
+                    <span className="text-4xl block">📷</span>
+                    <p className="text-sm font-semibold text-slate-700">Toma una foto o sube un archivo</p>
+                    <p className="text-xs text-slate-400">Formatos JPG, PNG, WEBP</p>
+                  </div>
+                </div>
+              )}
+
+              {scanPreviewUrl && !aiResult && (
+                <button
+                  onClick={analyzeImageWithAI}
+                  disabled={loadingScan}
+                  className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-6 py-3 rounded-xl transition active:scale-95 disabled:opacity-50 flex items-center justify-center space-x-2 shadow-md"
+                >
+                  {loadingScan ? (
+                    <span className="flex items-center space-x-1">
+                      <svg className="animate-spin h-5 w-5 text-white" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                      </svg>
+                      <span>Analizando imagen...</span>
+                    </span>
+                  ) : (
+                    <span>🪄 Analizar Alimento con IA</span>
+                  )}
+                </button>
+              )}
+            </div>
+
+            {/* Resultado del análisis */}
+            {aiResult && (
+              <div className="bg-white rounded-2xl p-6 border-2 border-emerald-500 shadow-md space-y-4 animate-scaleUp">
+                <div className="flex items-center space-x-2 text-emerald-600 font-bold text-sm">
+                  <span>❇️</span>
+                  <span>Análisis de la Inteligencia Artificial</span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div className="space-y-3">
+                    <div>
+                      <span className="text-xs text-slate-400 block">Alimento Detectado</span>
+                      <strong className="text-lg text-slate-800">{aiResult.name}</strong>
+                    </div>
+
+                    <div>
+                      <span className="text-xs text-slate-400 block">Categoría de Alacena</span>
+                      <span className="inline-block mt-1 px-3 py-1 bg-slate-100 rounded-full text-xs font-semibold text-slate-700">
+                        {aiResult.category}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div>
+                      <span className="text-xs text-slate-400 block">Cantidad Estimada</span>
+                      <span className="text-sm font-semibold text-slate-700">{aiResult.quantity}</span>
+                    </div>
+
+                    <div>
+                      <span className="text-xs text-slate-400 block">Estimación de Duración</span>
+                      <span className="inline-block mt-1 px-3 py-1 bg-amber-100 text-amber-800 rounded-full text-xs font-bold">
+                        Vence en aprox. {aiResult.estimatedDaysToExpiry} días
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {aiResult.nutritionalAdvice && (
+                  <div className="bg-emerald-50 rounded-xl p-3 border border-emerald-100">
+                    <p className="text-xs text-emerald-800">
+                      <strong>Tip Nutricional:</strong> {aiResult.nutritionalAdvice}
+                    </p>
+                  </div>
+                )}
+
+                <div className="flex flex-col sm:flex-row gap-2 pt-2">
+                  <button
+                    onClick={addAiResultToPantry}
+                    className="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 rounded-xl text-xs transition active:scale-95 text-center shadow-md shadow-emerald-100"
+                  >
+                    ✓ Confirmar y Añadir a Despensa
+                  </button>
+                  <button
+                    onClick={() => setAiResult(null)}
+                    className="bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-2.5 px-4 rounded-xl text-xs transition"
+                  >
+                    Descartar
+                  </button>
+                </div>
+              </div>
+            )}
+
+          </div>
+        )}
+
+        {/* --- PESTAÑA 5: RECETAS AI --- */}
+        {activeTab === 'recipes' && (
+          <div className="space-y-6 animate-fadeIn">
+            
+            <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-bold text-slate-800">Chef Inteligente SmartPantry</h2>
+                <p className="text-slate-500 text-xs mt-1">
+                  Crea menús saludables según lo que tienes en stock y evita desperdicios de alimentos.
+                </p>
+              </div>
+              <button
+                onClick={generateRecipesWithAI}
+                disabled={loadingRecipe}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2.5 rounded-xl text-xs transition active:scale-95 disabled:opacity-50"
+              >
+                {loadingRecipe ? 'Pensando...' : 'Generar Recetas'}
+              </button>
+            </div>
+
+            {loadingRecipe && (
+              <div className="space-y-4">
+                {[1, 2].map(n => (
+                  <div key={n} className="bg-white rounded-2xl p-6 border border-slate-200 space-y-3 animate-pulse">
+                    <div className="h-5 bg-slate-200 rounded w-1/3"></div>
+                    <div className="h-4 bg-slate-200 rounded w-1/4"></div>
+                    <div className="space-y-1">
+                      <div className="h-3 bg-slate-200 rounded w-full"></div>
+                      <div className="h-3 bg-slate-200 rounded w-5/6"></div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {recipes.length > 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {recipes.map((recipe, idx) => (
+                  <div 
+                    key={idx} 
+                    className="bg-white rounded-2xl p-5 border border-slate-200 hover:border-emerald-500 transition shadow-sm space-y-4 cursor-pointer"
+                    onClick={() => setSelectedRecipe(recipe)}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                        {recipe.difficulty}
+                      </span>
+                      <span className="text-xs text-slate-400">⏱ {recipe.prepTime}</span>
+                    </div>
+
+                    <div className="space-y-1">
+                      <h3 className="font-bold text-slate-800 hover:text-emerald-700 transition text-base line-clamp-1">
+                        {recipe.title}
+                      </h3>
+                      <p className="text-xs text-slate-500 italic line-clamp-2">
+                        "{recipe.healthHighlight}"
+                      </p>
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-100 flex justify-between items-center">
+                      <span className="text-xs text-slate-400">🔥 {recipe.calories}</span>
+                      <span className="text-xs text-emerald-600 font-bold flex items-center">
+                        Ver receta completa <span className="ml-1">→</span>
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              !loadingRecipe && (
+                <div className="bg-white rounded-2xl p-8 text-center border border-slate-200 text-slate-400">
+                  <span className="text-4xl block mb-2">🍽</span>
+                  <p className="text-sm font-semibold">¿Quieres ideas para comer hoy?</p>
+                  <p className="text-xs mt-1 mb-4">Pulsa el botón superior para crear platos saludables con IA.</p>
+                </div>
+              )
+            )}
+
+          </div>
+        )}
+
+        {/* --- PESTAÑA 6: GRUPO FAMILIAR --- */}
+        {activeTab === 'group' && (
+          <div className="space-y-6 animate-fadeIn">
+            
+            <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm">
+              <h2 className="text-lg font-bold text-slate-800">👪 Configuración de Grupo Familiar</h2>
+              <p className="text-slate-500 text-xs mt-1">
+                Sincroniza en tiempo real toda tu despensa, lista de imprescindibles y tips de cocina con todos los integrantes de tu hogar.
+              </p>
+            </div>
+
+            {profile.familyGroupId ? (
+              <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-6 space-y-4">
+                <div className="flex justify-between items-start">
+                  <div>
+                    <span className="text-xs text-emerald-700 font-bold uppercase tracking-wide">Tu grupo actual</span>
+                    <h3 className="text-xl font-bold text-emerald-900">{profile.familyGroupName}</h3>
+                  </div>
+                  <span className="px-3 py-1 bg-emerald-200 text-emerald-900 rounded-xl text-xs font-bold animate-pulse">
+                    COMPARTIDO ACTIVO
+                  </span>
+                </div>
+
+                <div className="bg-white rounded-xl p-4 border border-emerald-100 flex flex-col sm:flex-row justify-between items-center gap-3">
+                  <div>
+                    <span className="text-xs text-slate-400 block">Código para compartir</span>
+                    <strong className="text-lg text-slate-800 tracking-wider font-mono">{profile.familyGroupId}</strong>
+                  </div>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(profile.familyGroupId);
+                      showToast('Código copiado al portapapeles', 'success');
+                    }}
+                    className="bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs px-3 py-2 rounded-lg font-semibold transition"
+                  >
+                    📋 Copiar Código
+                  </button>
+                </div>
+
+                <div className="pt-4 border-t border-emerald-100 flex justify-between items-center text-xs">
+                  <p className="text-slate-500">
+                    Cualquier cambio se actualizará simultáneamente para todos los miembros.
+                  </p>
+                  <button
+                    onClick={handleLeaveFamilyGroup}
+                    className="bg-rose-100 hover:bg-rose-200 text-rose-700 px-3 py-1.5 rounded-lg font-bold transition"
+                  >
+                    Salir del Grupo
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                
+                {/* Crear grupo */}
+                <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-4">
+                  <h3 className="font-bold text-slate-800 text-sm">🆕 Crear un nuevo Grupo Familiar</h3>
+                  <p className="text-xs text-slate-500">
+                    Genera un código único de SmartPantry y compártelo con cualquiera en tu hogar.
+                  </p>
+                  <form onSubmit={handleCreateFamilyGroup} className="space-y-3">
+                    <div>
+                      <label className="text-xs font-semibold text-slate-500 block mb-1">Nombre de tu familia</label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="Ej. Familia Pérez"
+                        value={groupNameInput}
+                        onChange={(e) => setGroupNameInput(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-xs"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 rounded-xl text-xs transition shadow-sm"
+                    >
+                      Crear Grupo Familiar
+                    </button>
+                  </form>
+                </div>
+
+                {/* Unirse a grupo */}
+                <div className="bg-white rounded-2xl p-5 border border-slate-200 shadow-sm space-y-4">
+                  <h3 className="font-bold text-slate-800 text-sm">🔗 Unirse a un Grupo Existente</h3>
+                  <p className="text-xs text-slate-500">
+                    Introduce el código familiar proporcionado por otro miembro de tu hogar.
+                  </p>
+                  <form onSubmit={handleJoinFamilyGroup} className="space-y-3">
+                    <div>
+                      <label className="text-xs font-semibold text-slate-500 block mb-1">Introduce el código familiar</label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="SP-XXXXXX"
+                        value={groupCodeInput}
+                        onChange={(e) => setGroupCodeInput(e.target.value)}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-xs font-mono uppercase"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      className="w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-2.5 rounded-xl text-xs transition shadow-sm"
+                    >
+                      Unirse a Familia
+                    </button>
+                  </form>
+                </div>
+
+              </div>
+            )}
+
+          </div>
+        )}
+
+      </main>
+
+      {/* --- BOTONES DE NAVEGACIÓN INFERIOR (ÓPTIMO PARA MÓVILES Y IPAD) --- */}
+      <nav className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 py-2 px-4 shadow-lg flex justify-around items-center z-30">
+        
+        <button
+          onClick={() => setActiveTab('dashboard')}
+          className={`flex flex-col items-center space-y-1 text-[11px] font-medium transition ${
+            activeTab === 'dashboard' ? 'text-emerald-600' : 'text-slate-400 hover:text-slate-600'
+          }`}
+        >
+          <span className="text-xl">🏠</span>
+          <span>Inicio</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('pantry')}
+          className={`flex flex-col items-center space-y-1 text-[11px] font-medium transition ${
+            activeTab === 'pantry' ? 'text-emerald-600' : 'text-slate-400 hover:text-slate-600'
+          }`}
+        >
+          <span className="text-xl">🍏</span>
+          <span>Despensa</span>
+        </button>
+
+        {/* Botón Escáner destacado central */}
+        <button
+          onClick={() => setActiveTab('scan')}
+          className="flex flex-col items-center -translate-y-4 bg-emerald-600 text-white p-3.5 rounded-full shadow-lg hover:bg-emerald-700 transition active:scale-95 animate-pulse"
+        >
+          <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z"></path>
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z"></path>
+          </svg>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('essentials')}
+          className={`flex flex-col items-center space-y-1 text-[11px] font-medium transition ${
+            activeTab === 'essentials' ? 'text-emerald-600' : 'text-slate-400 hover:text-slate-600'
+          }`}
+        >
+          <span className="text-xl">📋</span>
+          <span>Lista Básica</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('recipes')}
+          className={`flex flex-col items-center space-y-1 text-[11px] font-medium transition ${
+            activeTab === 'recipes' ? 'text-emerald-600' : 'text-slate-400 hover:text-slate-600'
+          }`}
+        >
+          <span className="text-xl">👩‍🍳</span>
+          <span>Recetas</span>
+        </button>
+
+      </nav>
+
+      {/* --- MODALES --- */}
+      {/* Agregar manual despensa */}
+      {showAddPantryModal && (
+        <div className="fixed inset-0 bg-slate-900 bg-opacity-50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 space-y-4 animate-scaleUp">
+            <div className="flex justify-between items-center">
+              <h3 className="font-bold text-slate-800 text-lg">➕ Añadir a Despensa</h3>
+              <button onClick={() => setShowAddPantryModal(false)} className="text-slate-400 hover:text-slate-600 text-xl">✕</button>
+            </div>
+
+            <form onSubmit={handleAddManualPantry} className="space-y-4">
+              <div>
+                <label className="text-xs font-semibold text-slate-500 block mb-1">Nombre del alimento</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Ej. Yogur de Fresa"
+                  value={manualPantry.name}
+                  onChange={(e) => setManualPantry({...manualPantry, name: e.target.value})}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 block mb-1">Categoría</label>
+                  <select
+                    value={manualPantry.category}
+                    onChange={(e) => setManualPantry({...manualPantry, category: e.target.value})}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                  >
+                    {categories.filter(c => c !== 'Todos').map(cat => (
+                      <option key={cat} value={cat}>{cat}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 block mb-1">Cantidad</label>
+                  <input
+                    type="text"
+                    placeholder="Ej. 1 Litro, 500g, 4 unidades"
+                    value={manualPantry.quantity}
+                    onChange={(e) => setManualPantry({...manualPantry, quantity: e.target.value})}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-500 block mb-1">Días aproximados para caducidad</label>
+                <input
+                  type="number"
+                  min="1"
+                  required
+                  placeholder="Ej. 7"
+                  value={manualPantry.daysToExpiry}
+                  onChange={(e) => setManualPantry({...manualPantry, daysToExpiry: e.target.value})}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 rounded-xl transition active:scale-95 text-xs shadow-md"
+              >
+                Añadir Alimento
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Agregar manual imprescindible */}
+      {showAddEssentialModal && (
+        <div className="fixed inset-0 bg-slate-900 bg-opacity-50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 space-y-4 animate-scaleUp">
+            <div className="flex justify-between items-center">
+              <h3 className="font-bold text-slate-800 text-lg">➕ Añadir Imprescindible</h3>
+              <button onClick={() => setShowAddEssentialModal(false)} className="text-slate-400 hover:text-slate-600 text-xl">✕</button>
+            </div>
+
+            <form onSubmit={handleAddManualEssential} className="space-y-4">
+              <div>
+                <label className="text-xs font-semibold text-slate-500 block mb-1">Nombre del Imprescindible</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Ej. Huevos"
+                  value={manualEssential.name}
+                  onChange={(e) => setManualEssential({...manualEssential, name: e.target.value})}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 block mb-1">Categoría</label>
+                  <select
+                    value={manualEssential.category}
+                    onChange={(e) => setManualEssential({...manualEssential, category: e.target.value})}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                  >
+                    {categories.filter(c => c !== 'Todos').map(cat => (
+                      <option key={cat} value={cat}>{cat}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-semibold text-slate-500 block mb-1">Mínimo en Despensa</label>
+                  <input
+                    type="text"
+                    placeholder="Ej. 1 pack, 6 unidades"
+                    value={manualEssential.minQuantity}
+                    onChange={(e) => setManualEssential({...manualEssential, minQuantity: e.target.value})}
+                    className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 text-sm"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2.5 rounded-xl transition active:scale-95 text-xs shadow-md"
+              >
+                Añadir Imprescindible
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Detalles receta */}
+      {selectedRecipe && (
+        <div className="fixed inset-0 bg-slate-900 bg-opacity-50 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 space-y-4 my-8 animate-scaleUp">
+            <div className="flex justify-between items-start">
+              <div>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 uppercase tracking-wider">
+                  Receta Recomendada AI
+                </span>
+                <h3 className="font-bold text-slate-800 text-lg mt-1">{selectedRecipe.title}</h3>
+              </div>
+              <button onClick={() => setSelectedRecipe(null)} className="text-slate-400 hover:text-slate-600 text-xl p-1">✕</button>
+            </div>
+
+            <div className="flex justify-between py-2 border-y border-slate-100 text-xs text-slate-500">
+              <span>⏱ Prep: <strong>{selectedRecipe.prepTime}</strong></span>
+              <span>Dificultad: <strong>{selectedRecipe.difficulty}</strong></span>
+              <span>🔥 Calorías: <strong>{selectedRecipe.calories}</strong></span>
+            </div>
+
+            <p className="text-xs text-slate-500 italic">
+              "{selectedRecipe.healthHighlight}"
+            </p>
+
+            <div className="space-y-2">
+              <h4 className="font-bold text-xs text-slate-700">Ingredientes</h4>
+              <div className="flex flex-wrap gap-1.5">
+                {selectedRecipe.ingredientsUsed.map((ing, i) => (
+                  <span key={i} className="px-2 py-1 bg-emerald-50 text-emerald-800 text-[11px] rounded-lg font-medium border border-emerald-100">
+                    ✓ {ing}
+                  </span>
+                ))}
+                {selectedRecipe.ingredientsMissing && selectedRecipe.ingredientsMissing.map((ing, i) => (
+                  <span key={i} className="px-2 py-1 bg-rose-50 text-rose-800 text-[11px] rounded-lg font-medium border border-rose-100">
+                    ✗ Faltante: {ing}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <h4 className="font-bold text-xs text-slate-700">Instrucciones</h4>
+              <ol className="list-decimal pl-4 text-xs text-slate-600 space-y-1.5">
+                {selectedRecipe.instructions.map((step, i) => (
+                  <li key={i}>{step}</li>
+                ))}
+              </ol>
+            </div>
+
+            <div className="pt-2">
+              <button
+                onClick={() => setSelectedRecipe(null)}
+                className="w-full bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold py-2 rounded-xl text-xs transition"
+              >
+                Cerrar Receta
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
